@@ -1,0 +1,6 @@
+[submodule "lib/doctestjs"]
+	path = lib/doctestjs
+	url = https://github.com/ianb/doctestjs.git
+[submodule "lib/esprima"]
+	path = lib/esprima
+	url = https://github.com/ariya/esprima.git

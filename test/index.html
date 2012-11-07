@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>RTC.js</title>
+    <script src="../rtc.js"></script>
+    <script src="../lib/esprima/esprima.js"></script>
+    <script src="../lib/doctestjs/doctest.js"></script>
+    <link href="../lib/doctestjs/doctest.css" rel="stylesheet">
+  </head>
+  <body class="autodoctest">
+
+    <div class="test">
+      <p>Sanity check to verify RTC.js parsed.</p>
+      <pre class="commenttest">
+        print(typeof RTC);
+        // => object
+      </pre>
+    </div>
+
+    <div class="test">
+      <p>Verify that getVideoStream gets a camera feed to a video element.</p>
+      <video id="v1" width="320" height="240"></video>
+      <pre class="commenttest">
+        var stream = RTC.getVideoStream();
+        var video = document.getElementById("v1");
+        stream.addOutput(video);
+        stream.start(Spy("finished"));
+        wait(function() { return video.readyState == 4; });
+        // => finished([object LocalMediaStream])
+        stream.stop();
+        video.parentNode.removeChild(video);
+      </pre>
+    </div>
+
+  </body>
+</html>
