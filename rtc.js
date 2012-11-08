@@ -33,6 +33,7 @@ RTC.Errors = {
   "INVALID_OFFER": "The provided offer is invalid",
   "INVALID_ANSWER": "The provided answer is invalid",
   "INVALID_STREAM": "The provided stream is invalid",
+  "INVALID_CALLBACK": "The provided callback is invalid",
   "OFFER_ACCEPTED": "An offer has already been accepted",
   "ANSWER_ACCEPTED": "An answer has already been accepted",
   "OFFER_CREATED": "An offer has already been created",
@@ -82,21 +83,18 @@ RTC.createConnection = function(onError) {
   return new RTC.Connection(onError);
 };
 
-RTC.Stream = function(options, onError) {
+RTC.Stream = function(options, onError, stream) {
   this._queue = [];
   this._pcQueue = [];
   this._outputs = [];
   this._running = false;
 
-  this._stream = null;
+  this._stream = stream;
   this._error = onError;
   this._options = options;
 };
 RTC.Stream.prototype = {
   addOutput: function(obj) {
-    if (typeof obj == "object" && obj.addStream && obj.removeStream) {
-      obj = new RTC.Connection(this._error, obj);
-    }
     if (obj.addInput && obj._streamQueue) {
       this._addConnectionOutput(obj);
     } else {
@@ -118,7 +116,7 @@ RTC.Stream.prototype = {
       }
       while (self._pcQueue.length) {
         var conn = self._pcQueue.shift();
-        conn.addInput(stream);
+        conn.addInput(self);
       }
       if (onSuccess) {
         onSuccess(stream);
@@ -151,6 +149,7 @@ RTC.Stream.prototype = {
       case "Chrome":
         var url = URL.createObjectURL(this._stream);
         element.src = url;
+        element.play();
         this._outputs.push(element);
         break;
       case "Firefox":
@@ -194,7 +193,7 @@ RTC.Stream.prototype = {
       this._pcQueue.push(conn);
       conn._streamQueue.push(this);
     } else {
-      conn.addInput(this._stream);
+      conn.addInput(this);
     }
   }
 };
@@ -204,35 +203,38 @@ RTC.Connection = function(onError, pc) {
   this._offer = null;
   this._answer = null;
   this._error = onError;
+
   this._streamQueue = [];
+  this._pendingRemoteStreams = [];
 
-  if (this._pc) {
-    return;
+  if (!this._pc) {
+    switch (browser) {
+      case "Chrome":
+        this._pc = new webkitRTCPeerConnection(null);
+        break;
+      case "Firefox":
+        this._pc = new mozRTCPeerConnection();
+        break;
+      default:
+        this._error(RTC.Errors.getError("WEBRTC_UNSUPPORTED"));
+        return;
+    }
   }
 
-  switch (browser) {
-    case "Chrome":
-      this._pc = new webkitRTCPeerConnection(null);
-      break;
-    case "Firefox":
-      this._pc = new mozRTCPeerConnection();
-      break;
-    default:
-      this._error(RTC.Errors.getError("WEBRTC_UNSUPPORTED"));
-      return;
-  }
+  this._pc.onaddstream = this._onRemoteStreamAdded;
 };
 RTC.Connection.prototype = {
   addInput: function(stream) {
     if (typeof stream != "object" || !stream._stream) {
+      alert(stream);
       this._error(RTC.Errors.getError("INVALID_STREAM"));
       return;
     }
-    this._pc.addStream(stream);
+    this._pc.addStream(stream._stream);
   },
 
   makeOffer: function(onSuccess) {
-    if (!onSuccess) {
+    if (!onSuccess || typeof onSuccess != "function") {
       this._error(RTC.Errors.getError("CALLBACK_MISSING"));
       return;
     }
@@ -248,7 +250,7 @@ RTC.Connection.prototype = {
   },
 
   acceptOffer: function(offer, onSuccess) {
-    if (!onSuccess) {
+    if (!onSuccess || typeof onSuccess != "function") {
       this._error(RTC.Errors.getError("CALLBACK_MISSING"));
       return;
     }
@@ -268,15 +270,17 @@ RTC.Connection.prototype = {
     }
 
     var self = this;
-    this._pc.setRemoteDescription(finalOffer, function() {
+    this._setRemoteDescription(finalOffer, function() {
       self._pc.createAnswer(function(answer) {
         self._answer = answer;
-        onSuccess(JSON.stringify(answer));
+        self._pc.setLocalDescription(answer, function() {
+          onSuccess(JSON.stringify(answer));
+        });
       }, self._error);
-    }, this._error);
+    });
   },
 
-  acceptAnswer: function(answer, onSuccess) {
+  acceptAnswer: function(answer, onSuccess, onStream) {
     if (!this._offer) {
       this._error(RTC.Errors.getError("OFFER_NOT_CREATED"));
       return;
@@ -285,18 +289,22 @@ RTC.Connection.prototype = {
       this._error(RTC.Errors.getError("ANSWER_ACCEPTED"));
       return;
     }
-
-    var finalAnswer = this._validateDescription(answer, "answer");
-    if (!finalAnswer) {
-      this._error(RTC.Errors.getError("INVALID_ANSWER"));
-      return;
+    if (onStream && typeof onStream != "function") {
+      this._error(RTC.Errors.getError("INVALID_CALLBACK"));
+    } else {
+      this._onStream = onStream;
     }
 
-    this._pc.setRemoteDescription(answer, function() {
+    this._setRemoteDescription(finalAnswer, function() {
+      if (this._onStream) {
+        while (this._remoteStreams.length) {
+          this._onStream(this._remoteStreams.shift());
+        }
+      }
       if (onSuccess) {
         onSuccess();
       }
-    }, this._error);
+    });
   },
 
   _processQueue: function(onSuccess) {
@@ -351,6 +359,23 @@ RTC.Connection.prototype = {
     }
 
     return finalDesc;
+  },
+
+  _setRemoteDescription: function(desc, onSuccess) {
+    var self = this;
+    if (browser == "Chrome") {
+      desc = new RTCSessionDescription(desc);
+    }
+    this._pc.setRemoteDescription(desc, onSuccess, this._error);
+  },
+
+  _onRemoteStreamAdded: function(e) {
+    var wrapper = new RTC.Stream({}, null, e.stream);
+    if (this._onStream) {
+      this._onStream(wrapper);
+    } else {
+      this._pendingRemoteStreams.push(wrapper);
+    }
   }
 };
 
@@ -369,7 +394,7 @@ function makeStream(options, types, onError) {
 function defaultOnError(err) {
   var obj = err;
   if (!obj.message) {
-    obj = new Error("RTC Error: " + err.code || err.toString());
+    obj = new Error("RTC.js: " + err);
   }
   if (!obj.name) {
     obj.name = err.name || "UNSUPPORTED_ERROR";

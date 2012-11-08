@@ -33,5 +33,33 @@
       </pre>
     </div>
 
+    <div class="test">
+      <p>Verify that a 1-way video+audio call works.</p>
+      <video id="local" width="320" height="240"></video>
+      <video id="remote" width="320" height="240"></video>
+      <pre class="commenttest">
+        var localStream = RTC.getVideoStream(true);
+        var remoteStream = RTC.getVideoStream(true, {fake: true});
+        var localConnection = RTC.createConnection();
+        var remoteConnection = RTC.createConnection();
+
+        var localView = document.getElementById("local");
+        var remoteView = document.getElementById("remote");
+
+        localStream.addOutput(localView);
+        localStream.addOutput(localConnection);
+        remoteStream.addOutput(remoteConnection);
+
+        localConnection.makeOffer(function(offer) {
+          remoteConnection.acceptOffer(offer, function(answer) {
+            localConnection.acceptAnswer(answer, Spy("finished"), function(s) {
+              s.addOutput(remoteView);
+            });
+          });
+        });
+        // => finished()
+      </pre>
+    </div>
+
   </body>
 </html>
