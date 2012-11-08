@@ -221,7 +221,15 @@ RTC.Connection = function(onError, pc) {
     }
   }
 
-  this._pc.onaddstream = this._onRemoteStreamAdded;
+  var self = this;
+  this._pc.onaddstream = function(e) {
+    var wrapper = new RTC.Stream({}, null, e.stream);
+    if (self._onStream) {
+      self._onStream(wrapper);
+    } else {
+      self._pendingRemoteStreams.push(wrapper);
+    }
+  };
 };
 RTC.Connection.prototype = {
   addInput: function(stream) {
@@ -293,6 +301,12 @@ RTC.Connection.prototype = {
       this._error(RTC.Errors.getError("INVALID_CALLBACK"));
     } else {
       this._onStream = onStream;
+    }
+
+    var finalAnswer = this._validateDescription(answer, "answer");
+    if (!finalAnswer) {
+      this._error(RTC.Errors.getError("INVALID_ANSWER"));
+      return;
     }
 
     this._setRemoteDescription(finalAnswer, function() {
@@ -367,15 +381,6 @@ RTC.Connection.prototype = {
       desc = new RTCSessionDescription(desc);
     }
     this._pc.setRemoteDescription(desc, onSuccess, this._error);
-  },
-
-  _onRemoteStreamAdded: function(e) {
-    var wrapper = new RTC.Stream({}, null, e.stream);
-    if (this._onStream) {
-      this._onStream(wrapper);
-    } else {
-      this._pendingRemoteStreams.push(wrapper);
-    }
   }
 };
 
