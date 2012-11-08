@@ -25,9 +25,21 @@
 
 var RTC = {};
 RTC.Errors = {
-  "INVALID_ELEMENT": "Invalid jQuery element for display",
   "GUM_UNSUPPORTED": "This browser does not support getUserMedia",
-  "UNSUPPORTED_BROWSER": "This browser does not support WebRTC",
+  "WEBRTC_UNSUPPORTED": "This browser does not support WebRTC",
+  "INVALID_OUTPUT": "Invalid media element or connection for output",
+  "INVALID_CONNECTION": "This connection has not been correctly initialized",
+  "CALLBACK_MISSING": "The required callback has not been provided",
+  "INVALID_OFFER": "The provided offer is invalid",
+  "INVALID_ANSWER": "The provided answer is invalid",
+  "INVALID_STREAM": "The provided stream is invalid",
+  "OFFER_ACCEPTED": "An offer has already been accepted",
+  "ANSWER_ACCEPTED": "An answer has already been accepted",
+  "OFFER_CREATED": "An offer has already been created",
+  "ANSWER_CREATED": "An answer has already been created",
+  "OFFER_NOT_CREATED": "No offer has been created, cannot accept answer",
+  "STREAM_RUNNING": "Stream is already running",
+  "STREAM_NOT_RUNNING": "Stream is alread stopped",
   getError: function(name) {
     if (!RTC.Errors[name]) return;
     var err = new Error(RTC.Errors[name]);
@@ -63,42 +75,50 @@ RTC.getVideoStream = function(withAudio, options, onError) {
 RTC.getAudioStream = function(options, onError) {
   return makeStream(options, {audio: true, video: false}, onError);
 };
+RTC.createConnection = function(onError) {
+  if (!onError) {
+    onError = defaultOnError;
+  }
+  return new RTC.Connection(onError);
+};
 
 RTC.Stream = function(options, onError) {
   this._queue = [];
+  this._pcQueue = [];
   this._outputs = [];
+  this._running = false;
 
   this._stream = null;
   this._error = onError;
   this._options = options;
 };
 RTC.Stream.prototype = {
-  addOutput: function(element) {
-    var ele = element;
-    if (ele.jquery) {
-      if (ele.length != 1) {
-        this._error(RTC.Errors.getError("INVALID_ELEMENT"));
-        return;
-      }
-      ele = element.get(0);
+  addOutput: function(obj) {
+    if (typeof obj == "object" && obj.addStream && obj.removeStream) {
+      obj = new RTC.Connection(this._error, obj);
     }
-    if (this._options.video && ele.nodeName != "VIDEO") {
-      this._error(RTC.Errors.getError("INVALID_ELEMENT"));
-      return;
+    if (obj.addInput && obj._streamQueue) {
+      this._addConnectionOutput(obj);
+    } else {
+      this._addElementOutput(obj);
     }
-    if (this._options.audio && !this._options.video && ele.nodeName != "AUDIO") {
-      this._error(RTC.Errors.getError("INVALID_ELEMENT"));
-      return;
-    }
-    this._addToQueue(ele);
   },
 
   start: function(onSuccess) {
+    if (this._stream) {
+      this._error(RTC.Errors.getError("STREAM_RUNNING"));
+      return;
+    }
+
     var self = this;
     navigator.getUserMedia_(this._options, function(stream) {
       self._stream = stream;
       while (self._queue.length) {
         self._outputStream(self._queue.shift());
+      }
+      while (self._pcQueue.length) {
+        var conn = self._pcQueue.shift();
+        conn.addInput(stream);
       }
       if (onSuccess) {
         onSuccess(stream);
@@ -107,6 +127,11 @@ RTC.Stream.prototype = {
   },
 
   stop: function() {
+    if (!this._stream) {
+      this._error(RTC.Errors.getError("STREAM_NOT_RUNNING"));
+      return;
+    }
+
     if (typeof this._stream.stop == "function") {
       this._stream.stop();
     } else {
@@ -114,16 +139,7 @@ RTC.Stream.prototype = {
         this._outputs.shift().pause();
       }
     }
-  },
-
-  _addToQueue: function(element) {
-    if (this._stream) {
-      // If the stream is ready, we can display/play it immediately.
-      this._outputStream(element);
-    } else {
-      // Else, queue it up.
-      this._queue.push(element);
-    }
+    this._stream = null;
   },
 
   _outputStream: function(element) {
@@ -143,9 +159,198 @@ RTC.Stream.prototype = {
         this._outputs.push(element);
         break;
       default:
-        this._error(RTC.Errors.getError("UNSUPPORTED_BROWSER"));
+        this._error(RTC.Errors.getError("WEBRTC_UNSUPPORTED"));
         return;
     }
+  },
+
+  _addElementOutput: function(element) {
+    var ele = element;
+    if (ele.jquery) {
+      if (ele.length != 1) {
+        this._error(RTC.Errors.getError("INVALID_OUTPUT"));
+        return;
+      }
+      ele = element.get(0);
+    }
+    if (this._options.video && ele.nodeName != "VIDEO") {
+      this._error(RTC.Errors.getError("INVALID_OUTPUT"));
+      return;
+    }
+    if (this._options.audio && !this._options.video && ele.nodeName != "AUDIO") {
+      this._error(RTC.Errors.getError("INVALID_OUTPUT"));
+      return;
+    }
+
+    if (!this._stream) {
+      this._queue.push(element);
+    } else {
+      this._outputStream(element);
+    }
+  },
+
+  _addConnectionOutput: function(conn) {
+    if (!this._stream) {
+      this._pcQueue.push(conn);
+      conn._streamQueue.push(this);
+    } else {
+      conn.addInput(this._stream);
+    }
+  }
+};
+
+RTC.Connection = function(onError, pc) {
+  this._pc = pc;
+  this._offer = null;
+  this._answer = null;
+  this._error = onError;
+  this._streamQueue = [];
+
+  if (this._pc) {
+    return;
+  }
+
+  switch (browser) {
+    case "Chrome":
+      this._pc = new webkitRTCPeerConnection(null);
+      break;
+    case "Firefox":
+      this._pc = new mozRTCPeerConnection();
+      break;
+    default:
+      this._error(RTC.Errors.getError("WEBRTC_UNSUPPORTED"));
+      return;
+  }
+};
+RTC.Connection.prototype = {
+  addInput: function(stream) {
+    if (typeof stream != "object" || !stream._stream) {
+      this._error(RTC.Errors.getError("INVALID_STREAM"));
+      return;
+    }
+    this._pc.addStream(stream);
+  },
+
+  makeOffer: function(onSuccess) {
+    if (!onSuccess) {
+      this._error(RTC.Errors.getError("CALLBACK_MISSING"));
+      return;
+    }
+    if (this._offer) {
+      this._error(RTC.Errors.getError("OFFER_CREATED"));
+      return;
+    }
+    if (this._streamQueue.length) {
+      this._processQueue(onSuccess);
+    } else {
+      this._makeOffer(onSuccess);
+    }
+  },
+
+  acceptOffer: function(offer, onSuccess) {
+    if (!onSuccess) {
+      this._error(RTC.Errors.getError("CALLBACK_MISSING"));
+      return;
+    }
+    if (this._offer) {
+      this._error(RTC.Errors.getError("OFFER_ACCEPTED"));
+      return;
+    }
+    if (this._answer) {
+      this._error(RTC.Errors.getError("ANSWER_CREATED"));
+      return;
+    }
+
+    var finalOffer = this._validateDescription(offer, "offer");
+    if (!finalOffer) {
+      this._error(RTC.Errors.getError("INVALID_OFFER"));
+      return;
+    }
+
+    var self = this;
+    this._pc.setRemoteDescription(finalOffer, function() {
+      self._pc.createAnswer(function(answer) {
+        self._answer = answer;
+        onSuccess(JSON.stringify(answer));
+      }, self._error);
+    }, this._error);
+  },
+
+  acceptAnswer: function(answer, onSuccess) {
+    if (!this._offer) {
+      this._error(RTC.Errors.getError("OFFER_NOT_CREATED"));
+      return;
+    }
+    if (this._answer) {
+      this._error(RTC.Errors.getError("ANSWER_ACCEPTED"));
+      return;
+    }
+
+    var finalAnswer = this._validateDescription(answer, "answer");
+    if (!finalAnswer) {
+      this._error(RTC.Errors.getError("INVALID_ANSWER"));
+      return;
+    }
+
+    this._pc.setRemoteDescription(answer, function() {
+      if (onSuccess) {
+        onSuccess();
+      }
+    }, this._error);
+  },
+
+  _processQueue: function(onSuccess) {
+    var self = this;
+    var done = this._streamQueue.length;
+
+    while (this._streamQueue.length) {
+      var stream = this._streamQueue.shift();
+      if (stream._stream) {
+        _checkIfDone();
+      } else {
+        stream.start(_checkIfDone);
+      }
+    }
+
+    function _checkIfDone() {
+      done--;
+      if (done == 0) {
+        self._makeOffer(onSuccess);
+      }
+    }
+  },
+
+  _makeOffer: function(onSuccess) {
+    var self = this;
+    this._pc.createOffer(function(offer) {
+      self._offer = offer;
+      self._pc.setLocalDescription(offer, function() {
+        onSuccess(JSON.stringify(offer));
+      }, self._error)
+    }, this._error);
+  },
+
+  _validateDescription: function(desc, type) {
+    var finalDesc = null;
+    if (typeof desc == "object") {
+      if (!desc.sdp && !desc.type) {
+        return false;
+      }
+    } else if (typeof desc == "string") {
+      try {
+        finalDesc = JSON.parse(desc);
+      } catch(e) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+
+    if (finalDesc.type != type) {
+      return false;
+    }
+
+    return finalDesc;
   }
 };
 
